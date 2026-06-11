@@ -23,7 +23,7 @@ export async function convertPdfWithGemini(
   opts: ConvertPdfWithGeminiOptions
 ): Promise<ConvertPdfWithGeminiResult> {
   const { apiKey, pdfBase64, systemPrompt, signal } = opts;
-  const model = "gemini-2.0-flash";
+  const model = "gemini-2.5-flash";
 
   // Use the standard Google AI Studio endpoint
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
