@@ -151,7 +151,15 @@ export default function App() {
         }),
       });
 
-      const data = await response.json();
+      let data: any = {};
+      const contentType = response.headers.get("content-type");
+      if (contentType && contentType.includes("application/json")) {
+        data = await response.json();
+      } else {
+        const text = await response.text();
+        throw new Error(text || `Error del servidor (HTTP ${response.status})`);
+      }
+
       if (!response.ok) {
         throw new Error(data.error || data.details || "Error desconocido al procesar el PDF.");
       }
