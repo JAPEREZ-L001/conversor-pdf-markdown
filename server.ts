@@ -4,6 +4,7 @@ import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import rateLimit from "express-rate-limit";
 import { convertPdfWithFallback, FALLBACK_MODELS } from "./lib/openrouter-client";
+import { convertPdfWithGemini } from "./lib/gemini-client";
 
 dotenv.config();
 
@@ -36,10 +37,10 @@ Follow these rigid output formatting guidelines:
 ${instructions ? `6. Additional user request direction: "${instructions}"` : ""}`;
 }
 
-// PDF to Markdown conversion endpoint — OpenRouter with automatic fallback
+// PDF to Markdown conversion endpoint — OpenRouter with automatic fallback or direct Gemini AI Studio
 app.post("/api/convert-pdf", convertLimiter, async (req, res) => {
   try {
-    const { pdfBase64, fileName, options } = req.body;
+    const { pdfBase64, fileName, options, provider = "openrouter" } = req.body;
 
     if (!pdfBase64) {
       return res.status(400).json({ error: "Falta el archivo PDF en formato base64." });
@@ -54,11 +55,6 @@ app.post("/api/convert-pdf", convertLimiter, async (req, res) => {
       });
     }
 
-    const apiKey = process.env.OPENROUTER_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: "OPENROUTER_API_KEY no está configurada en el servidor." });
-    }
-
     const systemPrompt = buildSystemPrompt(options?.instructions ?? "");
 
     // 60-second timeout
@@ -67,20 +63,54 @@ app.post("/api/convert-pdf", convertLimiter, async (req, res) => {
 
     let result;
     try {
-      result = await convertPdfWithFallback({
-        apiKey,
-        pdfBase64,
-        fileName: fileName ?? "document.pdf",
-        systemPrompt,
-        referer: process.env.APP_URL ?? "http://localhost:3000",
-        signal: controller.signal,
-      });
+      if (provider === "gemini") {
+        const apiKey = process.env.GEMINI_API_KEY;
+        if (!apiKey) {
+          return res.status(400).json({
+            error: "La API Key de Google AI Studio (GEMINI_API_KEY) no está configurada en el servidor.",
+          });
+        }
+        const geminiRes = await convertPdfWithGemini({
+          apiKey,
+          pdfBase64,
+          fileName: fileName ?? "document.pdf",
+          systemPrompt,
+          signal: controller.signal,
+        });
+        result = {
+          markdown: geminiRes.markdown,
+          modelUsed: geminiRes.modelUsed,
+          attemptsCount: 1,
+          maxAttempts: 1,
+        };
+      } else {
+        const apiKey = process.env.OPENROUTER_API_KEY;
+        if (!apiKey) {
+          return res.status(400).json({
+            error: "La API Key de OpenRouter (OPENROUTER_API_KEY) no está configurada en el servidor.",
+          });
+        }
+        const openrouterRes = await convertPdfWithFallback({
+          apiKey,
+          pdfBase64,
+          fileName: fileName ?? "document.pdf",
+          systemPrompt,
+          referer: process.env.APP_URL ?? "http://localhost:3000",
+          signal: controller.signal,
+        });
+        result = {
+          markdown: openrouterRes.markdown,
+          modelUsed: openrouterRes.modelUsed,
+          attemptsCount: openrouterRes.attemptsCount,
+          maxAttempts: FALLBACK_MODELS.length,
+        };
+      }
     } finally {
       clearTimeout(timeoutId);
     }
 
     console.log(
-      `✅ Conversion OK — model: ${result.modelUsed}, attempts: ${result.attemptsCount}/${FALLBACK_MODELS.length}`
+      `✅ Conversion OK — provider: ${provider}, model: ${result.modelUsed}, attempts: ${result.attemptsCount}/${result.maxAttempts}`
     );
 
     return res.json({

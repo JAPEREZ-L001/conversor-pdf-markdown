@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { convertPdfWithFallback, FALLBACK_MODELS } from "../lib/openrouter-client";
+import { convertPdfWithGemini } from "../lib/gemini-client";
 
 // In-memory rate limiter (per serverless instance)
 const limiterStore = new Map<string, { count: number; resetAt: number }>();
@@ -44,16 +45,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
   }
 
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({ error: "OPENROUTER_API_KEY no está configurada en el servidor." });
-  }
-
   try {
-    const { pdfBase64, fileName, options } = req.body as {
+    const { pdfBase64, fileName, options, provider = "openrouter" } = req.body as {
       pdfBase64: string;
       fileName?: string;
       options?: { instructions?: string };
+      provider?: "openrouter" | "gemini";
     };
 
     if (!pdfBase64) {
@@ -77,20 +74,54 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     let result;
     try {
-      result = await convertPdfWithFallback({
-        apiKey,
-        pdfBase64,
-        fileName: fileName ?? "document.pdf",
-        systemPrompt,
-        referer: "https://conversor-de-pdf-a-markdown.vercel.app",
-        signal: controller.signal,
-      });
+      if (provider === "gemini") {
+        const apiKey = process.env.GEMINI_API_KEY;
+        if (!apiKey) {
+          return res.status(400).json({
+            error: "La API Key de Google AI Studio (GEMINI_API_KEY) no está configurada en el servidor.",
+          });
+        }
+        const geminiRes = await convertPdfWithGemini({
+          apiKey,
+          pdfBase64,
+          fileName: fileName ?? "document.pdf",
+          systemPrompt,
+          signal: controller.signal,
+        });
+        result = {
+          markdown: geminiRes.markdown,
+          modelUsed: geminiRes.modelUsed,
+          attemptsCount: 1,
+          maxAttempts: 1,
+        };
+      } else {
+        const apiKey = process.env.OPENROUTER_API_KEY;
+        if (!apiKey) {
+          return res.status(400).json({
+            error: "La API Key de OpenRouter (OPENROUTER_API_KEY) no está configurada en el servidor.",
+          });
+        }
+        const openrouterRes = await convertPdfWithFallback({
+          apiKey,
+          pdfBase64,
+          fileName: fileName ?? "document.pdf",
+          systemPrompt,
+          referer: "https://conversor-de-pdf-a-markdown.vercel.app",
+          signal: controller.signal,
+        });
+        result = {
+          markdown: openrouterRes.markdown,
+          modelUsed: openrouterRes.modelUsed,
+          attemptsCount: openrouterRes.attemptsCount,
+          maxAttempts: FALLBACK_MODELS.length,
+        };
+      }
     } finally {
       clearTimeout(timeoutId);
     }
 
     console.log(
-      `✅ Conversion OK — model: ${result.modelUsed}, attempts: ${result.attemptsCount}/${FALLBACK_MODELS.length}`
+      `✅ Conversion OK — provider: ${provider}, model: ${result.modelUsed}, attempts: ${result.attemptsCount}/${result.maxAttempts}`
     );
 
     return res.status(200).json({

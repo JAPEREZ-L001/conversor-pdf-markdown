@@ -37,6 +37,17 @@ export default function App() {
   const [markdownResult, setMarkdownResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   
+  // Engine Provider State
+  const [provider, setProvider] = useState<"openrouter" | "gemini">(() => {
+    const saved = localStorage.getItem("conversor_provider");
+    return (saved === "gemini" ? "gemini" : "openrouter") as "openrouter" | "gemini";
+  });
+
+  const handleProviderChange = (newProvider: "openrouter" | "gemini") => {
+    setProvider(newProvider);
+    localStorage.setItem("conversor_provider", newProvider);
+  };
+
   // Custom advanced conversion options
   const [showOptions, setShowOptions] = useState<boolean>(false);
   const [customInstructions, setCustomInstructions] = useState<string>("");
@@ -133,6 +144,7 @@ export default function App() {
         body: JSON.stringify({
           pdfBase64: fileBase64,
           fileName,
+          provider,
           options: {
             instructions: instructions.trim(),
           },
@@ -210,8 +222,10 @@ export default function App() {
           </div>
           
           <div className="flex items-center space-x-2 text-xs text-neutral-500 font-mono">
-            <span className="w-2 h-2 rounded-full bg-emerald-500" />
-            <span>AI powered by Gemini 1.5 Flash</span>
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            <span>
+              {provider === "gemini" ? "Gemini 2.0 Flash (AI Studio)" : "OpenRouter (Gemini/Gemma)"}
+            </span>
           </div>
         </div>
       </header>
@@ -234,6 +248,42 @@ export default function App() {
           {/* Left Column: Actions / Upload */}
           <div className="lg:col-span-5 flex flex-col space-y-6">
             
+            {/* Engine Selector Card */}
+            <div className="bg-white rounded-xl border border-neutral-200 p-5 shadow-xs">
+              <label className="text-xs font-semibold text-neutral-500 uppercase tracking-wider block mb-3 font-mono">
+                Motor de Inteligencia Artificial
+              </label>
+              <div className="grid grid-cols-2 gap-2 bg-neutral-50 p-1 rounded-lg border border-neutral-100">
+                <button
+                  type="button"
+                  onClick={() => handleProviderChange("openrouter")}
+                  className={`py-2 px-3 rounded-md text-xs font-semibold tracking-tight transition-all cursor-pointer ${
+                    provider === "openrouter"
+                      ? "bg-white text-neutral-950 shadow-xs border border-neutral-200/50"
+                      : "text-neutral-500 hover:text-neutral-800 border border-transparent"
+                  }`}
+                >
+                  OpenRouter
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleProviderChange("gemini")}
+                  className={`py-2 px-3 rounded-md text-xs font-semibold tracking-tight transition-all cursor-pointer ${
+                    provider === "gemini"
+                      ? "bg-white text-neutral-950 shadow-xs border border-neutral-200/50"
+                      : "text-neutral-500 hover:text-neutral-800 border border-transparent"
+                  }`}
+                >
+                  Google AI Studio
+                </button>
+              </div>
+              <p className="text-[11px] text-neutral-400 mt-2.5 leading-relaxed font-sans">
+                {provider === "openrouter"
+                  ? "Utiliza una cadena de fallbacks (Gemini 2.0 → Gemma 31B → Gemma 26B). Requiere mínimo $1 USD de saldo en tu cuenta de OpenRouter."
+                  : "Conexión directa y 100% gratuita utilizando la API Key oficial de Google AI Studio (modelo Gemini 2.0 Flash). Sin mínimos de saldo."}
+              </p>
+            </div>
+
             {/* Upload Zone */}
             <motion.div
               layout
@@ -497,7 +547,7 @@ export default function App() {
                       </h3>
                       <div className="max-w-xs space-y-1.5">
                         <p className="text-xs text-neutral-400 font-sans tracking-wide">
-                          Gemini 1.5 Flash está procesando el archivo PDF para preservar el formato sin perder detalles.
+                          {provider === "gemini" ? "Gemini 2.0 Flash" : "El motor de OpenRouter"} está procesando el archivo PDF para preservar el formato sin perder detalles.
                         </p>
                         <div className="w-36 h-1.5 bg-neutral-100 rounded-full mx-auto overflow-hidden mt-4">
                           <div className="h-full bg-neutral-900 rounded-full animate-[loading_1.5s_infinite_ease-in-out]" style={{ width: "60%" }} />
@@ -620,7 +670,7 @@ export default function App() {
             </div>
             <h4 className="font-semibold text-neutral-800 font-sans text-sm mb-1.5">Sin Límite de Estructurado</h4>
             <p className="text-xs text-neutral-400 leading-relaxed">
-               Diseñado para procesar con alta velocidad gracias al motor Gemini 3.5 Flash proporcionando respuestas robustas en segundos.
+               Diseñado para procesar con alta velocidad gracias al motor Gemini 2.0 Flash proporcionando respuestas robustas en segundos.
             </p>
           </div>
         </section>
