@@ -161,7 +161,8 @@ export default function App() {
       }
 
       if (!response.ok) {
-        throw new Error(data.error || data.details || "Error desconocido al procesar el PDF.");
+        const detailMsg = data.details ? ` (${data.details})` : "";
+        throw new Error((data.error || "Error al procesar el PDF.") + detailMsg);
       }
 
       setMarkdownResult(data.markdown);
