@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { convertPdfWithFallback, FALLBACK_MODELS } from "../lib/openrouter-client";
-import { convertPdfWithGemini } from "../lib/gemini-client";
+import { convertPdfWithFallback, FALLBACK_MODELS } from "../lib/openrouter-client.js";
+import { convertPdfWithGemini } from "../lib/gemini-client.js";
 
 // In-memory rate limiter (per serverless instance)
 const limiterStore = new Map<string, { count: number; resetAt: number }>();
