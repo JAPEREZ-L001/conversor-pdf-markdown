@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { convertPdfWithFallback, FALLBACK_MODELS } from "../lib/openrouter-client";
 
 // In-memory rate limiter (per serverless instance)
 const limiterStore = new Map<string, { count: number; resetAt: number }>();
@@ -35,8 +36,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   // Rate limiting by IP
   const clientIp =
-    (req.headers["x-forwarded-for"] as string)?.split(",")[0].trim() ||
-    "unknown";
+    (req.headers["x-forwarded-for"] as string)?.split(",")[0].trim() ?? "unknown";
 
   if (!checkRateLimit(clientIp)) {
     return res.status(429).json({
@@ -69,73 +69,35 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
     }
 
-    const systemPrompt = buildSystemPrompt(options?.instructions || "");
+    const systemPrompt = buildSystemPrompt(options?.instructions ?? "");
 
-    // 60-second timeout via AbortController
+    // 60-second timeout
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 60_000);
 
-    let markdownText = "";
+    let result;
     try {
-      // OpenRouter API — OpenAI-compatible endpoint with PDF support
-      // Model: google/gemini-2.0-flash-exp:free  (free tier, supports PDF inline)
-      const orRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
+      result = await convertPdfWithFallback({
+        apiKey,
+        pdfBase64,
+        fileName: fileName ?? "document.pdf",
+        systemPrompt,
+        referer: "https://conversor-de-pdf-a-markdown.vercel.app",
         signal: controller.signal,
-        headers: {
-          "Authorization": `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": "https://conversor-de-pdf-a-markdown.vercel.app",
-          "X-Title": "Conversor PDF a Markdown",
-        },
-        body: JSON.stringify({
-          model: "google/gemini-2.0-flash-exp:free",
-          messages: [
-            {
-              role: "system",
-              content: systemPrompt,
-            },
-            {
-              role: "user",
-              content: [
-                {
-                  type: "text",
-                  text: "Convert this PDF document to clean, elegant, and standard Markdown format according to your parsing instructions.",
-                },
-                {
-                  // OpenRouter supports PDF as a file part following the OpenAI file format
-                  type: "file",
-                  file: {
-                    filename: fileName || "document.pdf",
-                    file_data: `data:application/pdf;base64,${pdfBase64}`,
-                  },
-                },
-              ],
-            },
-          ],
-        }),
       });
-
-      if (!orRes.ok) {
-        const errBody = await orRes.json().catch(() => ({}));
-        const errMsg = (errBody as any)?.error?.message || orRes.statusText;
-        throw new Error(`OpenRouter API error ${orRes.status}: ${errMsg}`);
-      }
-
-      const data = await orRes.json() as any;
-      markdownText = data?.choices?.[0]?.message?.content || "";
-
-      if (!markdownText) {
-        throw new Error("El modelo no devolvió contenido. Intenta con un PDF diferente.");
-      }
     } finally {
       clearTimeout(timeoutId);
     }
 
+    console.log(
+      `✅ Conversion OK — model: ${result.modelUsed}, attempts: ${result.attemptsCount}/${FALLBACK_MODELS.length}`
+    );
+
     return res.status(200).json({
       success: true,
-      markdown: markdownText,
-      fileName: fileName || "document.pdf",
+      markdown: result.markdown,
+      fileName: fileName ?? "document.pdf",
+      modelUsed: result.modelUsed,
     });
   } catch (error: any) {
     console.error("Serverless conversion error:", error);
@@ -148,7 +110,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     return res.status(500).json({
       error: "Error durante la conversión del PDF a Markdown.",
-      details: error?.message || "Internal Server Error",
+      details: error?.message ?? "Internal Server Error",
     });
   }
 }

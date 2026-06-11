@@ -3,6 +3,7 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import rateLimit from "express-rate-limit";
+import { convertPdfWithFallback, FALLBACK_MODELS } from "./lib/openrouter-client";
 
 dotenv.config();
 
@@ -35,7 +36,7 @@ Follow these rigid output formatting guidelines:
 ${instructions ? `6. Additional user request direction: "${instructions}"` : ""}`;
 }
 
-// PDF to Markdown conversion endpoint — OpenRouter backend
+// PDF to Markdown conversion endpoint — OpenRouter with automatic fallback
 app.post("/api/convert-pdf", convertLimiter, async (req, res) => {
   try {
     const { pdfBase64, fileName, options } = req.body;
@@ -58,64 +59,35 @@ app.post("/api/convert-pdf", convertLimiter, async (req, res) => {
       return res.status(500).json({ error: "OPENROUTER_API_KEY no está configurada en el servidor." });
     }
 
-    const systemPrompt = buildSystemPrompt(options?.instructions || "");
+    const systemPrompt = buildSystemPrompt(options?.instructions ?? "");
 
-    // AbortController for 60-second timeout
+    // 60-second timeout
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 60_000);
 
-    let markdownText = "";
+    let result;
     try {
-      const orRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
+      result = await convertPdfWithFallback({
+        apiKey,
+        pdfBase64,
+        fileName: fileName ?? "document.pdf",
+        systemPrompt,
+        referer: process.env.APP_URL ?? "http://localhost:3000",
         signal: controller.signal,
-        headers: {
-          "Authorization": `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": process.env.APP_URL || "http://localhost:3000",
-          "X-Title": "Conversor PDF a Markdown",
-        },
-        body: JSON.stringify({
-          model: "google/gemini-2.0-flash-exp:free",
-          messages: [
-            { role: "system", content: systemPrompt },
-            {
-              role: "user",
-              content: [
-                { type: "text", text: "Convert this PDF document to clean, elegant, and standard Markdown format according to your parsing instructions." },
-                {
-                  type: "file",
-                  file: {
-                    filename: fileName || "document.pdf",
-                    file_data: `data:application/pdf;base64,${pdfBase64}`,
-                  },
-                },
-              ],
-            },
-          ],
-        }),
       });
-
-      if (!orRes.ok) {
-        const errBody = await orRes.json().catch(() => ({}));
-        const errMsg = (errBody as any)?.error?.message || orRes.statusText;
-        throw new Error(`OpenRouter API error ${orRes.status}: ${errMsg}`);
-      }
-
-      const data = await orRes.json() as any;
-      markdownText = data?.choices?.[0]?.message?.content || "";
-
-      if (!markdownText) {
-        throw new Error("El modelo no devolvió contenido. Intenta con un PDF diferente.");
-      }
     } finally {
       clearTimeout(timeoutId);
     }
 
+    console.log(
+      `✅ Conversion OK — model: ${result.modelUsed}, attempts: ${result.attemptsCount}/${FALLBACK_MODELS.length}`
+    );
+
     return res.json({
       success: true,
-      markdown: markdownText,
-      fileName: fileName || "document.pdf",
+      markdown: result.markdown,
+      fileName: fileName ?? "document.pdf",
+      modelUsed: result.modelUsed,
     });
   } catch (error: any) {
     console.error("Conversion error details:", error);
@@ -128,7 +100,7 @@ app.post("/api/convert-pdf", convertLimiter, async (req, res) => {
 
     return res.status(500).json({
       error: "Error durante la conversión del PDF a Markdown.",
-      details: error?.message || "Internal Server Error",
+      details: error?.message ?? "Internal Server Error",
     });
   }
 });
