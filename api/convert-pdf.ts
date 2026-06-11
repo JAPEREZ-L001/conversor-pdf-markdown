@@ -1,43 +1,34 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { GoogleGenAI } from "@google/genai";
-import rateLimit from "express-rate-limit";
 
-// In-memory store for rate limiting (resets on cold start)
-// For Vercel Serverless this is per-instance, sufficient for free tier protection
+// In-memory rate limiter (per serverless instance)
 const limiterStore = new Map<string, { count: number; resetAt: number }>();
 
 function checkRateLimit(ip: string): boolean {
   const now = Date.now();
   const windowMs = 60_000;
   const maxRequests = 5;
-
   const entry = limiterStore.get(ip);
   if (!entry || now > entry.resetAt) {
     limiterStore.set(ip, { count: 1, resetAt: now + windowMs });
-    return true; // allowed
+    return true;
   }
-  if (entry.count >= maxRequests) {
-    return false; // blocked
-  }
+  if (entry.count >= maxRequests) return false;
   entry.count++;
-  return true; // allowed
+  return true;
 }
 
-const getGeminiClient = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("GEMINI_API_KEY is not defined in environment variables.");
-  }
-  return new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: { "User-Agent": "aistudio-build" },
-    },
-  });
-};
+function buildSystemPrompt(instructions: string): string {
+  return `You are an expert document parser. Your goal is to convert the uploaded PDF document into structured, clean Markdown (.md) format.
+Follow these rigid output formatting guidelines:
+1. Retain document structures: headings (H1, H2, H3), paragraphs, bullet/numbered lists, quotes, tables, bold/italic formatting, and code blocks.
+2. Structure tables precisely using standard Markdown table syntax.
+3. Keep the output strictly in Markdown format. Do NOT wrap the entire output in a triple-backtick markdown block (like \`\`\`markdown ... \`\`\`) unless the document itself exists exclusively to contain custom source code formatting.
+4. If there are headers, footers, page numbers, or repetitive navigation artifacts, omit them gracefully unless they hold actual content value.
+5. If mathematical equations or formulas are present, format them clearly in standard LaTeX format (using $$ for block math and $ for inline math).
+${instructions ? `6. Additional user request direction: "${instructions}"` : ""}`;
+}
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // Only allow POST
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Método no permitido." });
   }
@@ -45,13 +36,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // Rate limiting by IP
   const clientIp =
     (req.headers["x-forwarded-for"] as string)?.split(",")[0].trim() ||
-    req.socket?.remoteAddress ||
     "unknown";
 
   if (!checkRateLimit(clientIp)) {
     return res.status(429).json({
       error: "Demasiadas solicitudes. Por favor, espera un momento antes de convertir otro archivo.",
     });
+  }
+
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: "OPENROUTER_API_KEY no está configurada en el servidor." });
   }
 
   try {
@@ -74,35 +69,65 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
     }
 
-    const ai = getGeminiClient();
+    const systemPrompt = buildSystemPrompt(options?.instructions || "");
 
-    const promptInstructions = options?.instructions || "";
-    const systemPrompt = `You are an expert document parser. Your goal is to convert the uploaded PDF document into structured, clean Markdown (.md) format.
-Follow these rigid output formatting guidelines:
-1. Retain document structures: headings (H1, H2, H3), paragraphs, bullet/numbered lists, quotes, tables, bold/italic formatting, and code blocks.
-2. Structure tables precisely using standard Markdown table syntax.
-3. Keep the output strictly in Markdown format. Do NOT wrap the entire output in a triple-backtick markdown block (like \`\`\`markdown ... \`\`\`) unless the document itself exists exclusively to contain custom source code formatting.
-4. If there are headers, footers, page numbers, or repetitive navigation artifacts, omit them gracefully unless they hold actual content value.
-5. If mathematical equations or formulas are present, format them clearly in standard LaTeX format (using $$ for block math and $ for inline math).
-${promptInstructions ? `6. Additional user request direction: "${promptInstructions}"` : ""}`;
-
-    // 60-second timeout
+    // 60-second timeout via AbortController
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 60_000);
 
     let markdownText = "";
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-1.5-flash",
-        contents: {
-          parts: [
-            { inlineData: { mimeType: "application/pdf", data: pdfBase64 } },
-            { text: "Convert this PDF document to clean, elegant, and standard Markdown format according to your parsing instructions." },
-          ],
+      // OpenRouter API — OpenAI-compatible endpoint with PDF support
+      // Model: google/gemini-2.0-flash-exp:free  (free tier, supports PDF inline)
+      const orRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "https://conversor-de-pdf-a-markdown.vercel.app",
+          "X-Title": "Conversor PDF a Markdown",
         },
-        config: { systemInstruction: systemPrompt },
+        body: JSON.stringify({
+          model: "google/gemini-2.0-flash-exp:free",
+          messages: [
+            {
+              role: "system",
+              content: systemPrompt,
+            },
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: "Convert this PDF document to clean, elegant, and standard Markdown format according to your parsing instructions.",
+                },
+                {
+                  // OpenRouter supports PDF as a file part following the OpenAI file format
+                  type: "file",
+                  file: {
+                    filename: fileName || "document.pdf",
+                    file_data: `data:application/pdf;base64,${pdfBase64}`,
+                  },
+                },
+              ],
+            },
+          ],
+        }),
       });
-      markdownText = response.text || "";
+
+      if (!orRes.ok) {
+        const errBody = await orRes.json().catch(() => ({}));
+        const errMsg = (errBody as any)?.error?.message || orRes.statusText;
+        throw new Error(`OpenRouter API error ${orRes.status}: ${errMsg}`);
+      }
+
+      const data = await orRes.json() as any;
+      markdownText = data?.choices?.[0]?.message?.content || "";
+
+      if (!markdownText) {
+        throw new Error("El modelo no devolvió contenido. Intenta con un PDF diferente.");
+      }
     } finally {
       clearTimeout(timeoutId);
     }

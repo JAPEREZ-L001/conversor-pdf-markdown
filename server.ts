@@ -1,7 +1,6 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
 import rateLimit from "express-rate-limit";
 
@@ -15,9 +14,8 @@ app.use(express.json({ limit: "15mb" }));
 app.use(express.urlencoded({ limit: "15mb", extended: true }));
 
 // Rate limiter: max 5 conversion requests per IP per minute
-// Protects the Gemini free-tier quota (15 RPM total)
 const convertLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute window
+  windowMs: 60 * 1000,
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
@@ -26,23 +24,18 @@ const convertLimiter = rateLimit({
   },
 });
 
-// Initialize the GoogleGenAI instance with appropriate User-Agent headers
-const getGeminiClient = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("GEMINI_API_KEY is not defined in environment variables.");
-  }
-  return new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        "User-Agent": "aistudio-build",
-      },
-    },
-  });
-};
+function buildSystemPrompt(instructions: string): string {
+  return `You are an expert document parser. Your goal is to convert the uploaded PDF document into structured, clean Markdown (.md) format.
+Follow these rigid output formatting guidelines:
+1. Retain document structures: headings (H1, H2, H3), paragraphs, bullet/numbered lists, quotes, tables, bold/italic formatting, and code blocks.
+2. Structure tables precisely using standard Markdown table syntax.
+3. Keep the output strictly in Markdown format. Do NOT wrap the entire output in a triple-backtick markdown block (like \`\`\`markdown ... \`\`\`) unless the document itself exists exclusively to contain custom source code formatting.
+4. If there are headers, footers, page numbers, or repetitive navigation artifacts, omit them gracefully unless they hold actual content value.
+5. If mathematical equations or formulas are present, format them clearly in standard LaTeX format (using $$ for block math and $ for inline math).
+${instructions ? `6. Additional user request direction: "${instructions}"` : ""}`;
+}
 
-// PDF to Markdown conversion endpoint
+// PDF to Markdown conversion endpoint — OpenRouter backend
 app.post("/api/convert-pdf", convertLimiter, async (req, res) => {
   try {
     const { pdfBase64, fileName, options } = req.body;
@@ -53,36 +46,19 @@ app.post("/api/convert-pdf", convertLimiter, async (req, res) => {
 
     // Validate PDF size server-side (max 10 MB decoded)
     const estimatedBytes = Math.ceil((pdfBase64.length * 3) / 4);
-    const maxBytes = 10 * 1024 * 1024; // 10 MB
+    const maxBytes = 10 * 1024 * 1024;
     if (estimatedBytes > maxBytes) {
       return res.status(413).json({
         error: `El archivo PDF supera el límite de 10 MB (tamaño estimado: ${(estimatedBytes / 1024 / 1024).toFixed(1)} MB). Por favor, usa un archivo más pequeño.`,
       });
     }
 
-    const ai = getGeminiClient();
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: "OPENROUTER_API_KEY no está configurada en el servidor." });
+    }
 
-    // Prepare system instruction or custom instructions based on user choices
-    const promptInstructions = options?.instructions || "";
-    const systemPrompt = `You are an expert document parser. Your goal is to convert the uploaded PDF document into structured, clean Markdown (.md) format.
-Follow these rigid output formatting guidelines:
-1. Retain document structures: headings (H1, H2, H3), paragraphs, bullet/numbered lists, quotes, tables, bold/italic formatting, and code blocks.
-2. Structure tables precisely using standard Markdown table syntax.
-3. Keep the output strictly in Markdown format. Do NOT wrap the entire output in a triple-backtick markdown block (like \`\`\`markdown ... \`\`\`) unless the document itself exists exclusively to contain custom source code formatting.
-4. If there are headers, footers, page numbers, or repetitive navigation artifacts, omit them gracefully unless they hold actual content value.
-5. If mathematical equations or formulas are present, format them clearly in standard LaTeX format (using $$ for block math and $ for inline math).
-${promptInstructions ? `6. Additional user request direction: "${promptInstructions}"` : ""}`;
-
-    const pdfPart = {
-      inlineData: {
-        mimeType: "application/pdf",
-        data: pdfBase64,
-      },
-    };
-
-    const textPart = {
-      text: "Convert this PDF document to clean, elegant, and standard Markdown format according to your parsing instructions.",
-    };
+    const systemPrompt = buildSystemPrompt(options?.instructions || "");
 
     // AbortController for 60-second timeout
     const controller = new AbortController();
@@ -90,14 +66,48 @@ ${promptInstructions ? `6. Additional user request direction: "${promptInstructi
 
     let markdownText = "";
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-1.5-flash",
-        contents: { parts: [pdfPart, textPart] },
-        config: {
-          systemInstruction: systemPrompt,
+      const orRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": process.env.APP_URL || "http://localhost:3000",
+          "X-Title": "Conversor PDF a Markdown",
         },
+        body: JSON.stringify({
+          model: "google/gemini-2.0-flash-exp:free",
+          messages: [
+            { role: "system", content: systemPrompt },
+            {
+              role: "user",
+              content: [
+                { type: "text", text: "Convert this PDF document to clean, elegant, and standard Markdown format according to your parsing instructions." },
+                {
+                  type: "file",
+                  file: {
+                    filename: fileName || "document.pdf",
+                    file_data: `data:application/pdf;base64,${pdfBase64}`,
+                  },
+                },
+              ],
+            },
+          ],
+        }),
       });
-      markdownText = response.text || "";
+
+      if (!orRes.ok) {
+        const errBody = await orRes.json().catch(() => ({}));
+        const errMsg = (errBody as any)?.error?.message || orRes.statusText;
+        throw new Error(`OpenRouter API error ${orRes.status}: ${errMsg}`);
+      }
+
+      const data = await orRes.json() as any;
+      markdownText = data?.choices?.[0]?.message?.content || "";
+
+      if (!markdownText) {
+        throw new Error("El modelo no devolvió contenido. Intenta con un PDF diferente.");
+      }
     } finally {
       clearTimeout(timeoutId);
     }
