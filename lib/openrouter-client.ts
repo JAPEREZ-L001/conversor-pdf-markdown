@@ -99,6 +99,20 @@ export async function convertPdfWithFallback(
       if (!response.ok) {
         const body: OpenRouterError = await response.json().catch(() => ({}));
         const detail = body?.error?.message ?? response.statusText;
+
+        // OpenRouter requires at least $1 credit to access :free models (anti-abuse)
+        if (
+          response.status === 404 &&
+          typeof detail === "string" &&
+          detail.toLowerCase().includes("unavailable for free")
+        ) {
+          throw new Error(
+            "Los modelos gratuitos de OpenRouter requieren al menos $1 USD de crédito en tu cuenta. " +
+            "Ve a https://openrouter.ai/credits y carga $1. " +
+            "Después de eso, todos los modelos :free quedan desbloqueados permanentemente."
+          );
+        }
+
         const reason = `[${model}] HTTP ${response.status}: ${detail}`;
         errors.push(reason);
         console.warn(`OpenRouter fallback — ${reason}`);
