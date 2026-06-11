@@ -1,0 +1,6 @@
+{
+  "name": "Conversor de PDF a Markdown",
+  "description": "Una herramienta útil y rápida para convertir tus archivos PDF a formato Markdown (.md) conservando la estructura original.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

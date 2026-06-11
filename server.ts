@@ -1,0 +1,157 @@
+import express from "express";
+import path from "path";
+import { createServer as createViteServer } from "vite";
+import { GoogleGenAI } from "@google/genai";
+import dotenv from "dotenv";
+import rateLimit from "express-rate-limit";
+
+dotenv.config();
+
+const app = express();
+const PORT = parseInt(process.env.PORT || "3000", 10);
+
+// Increase request size limit to support uploading larger PDFs in Base64
+app.use(express.json({ limit: "15mb" }));
+app.use(express.urlencoded({ limit: "15mb", extended: true }));
+
+// Rate limiter: max 5 conversion requests per IP per minute
+// Protects the Gemini free-tier quota (15 RPM total)
+const convertLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute window
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: "Demasiadas solicitudes. Por favor, espera un momento antes de convertir otro archivo.",
+  },
+});
+
+// Initialize the GoogleGenAI instance with appropriate User-Agent headers
+const getGeminiClient = () => {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY is not defined in environment variables.");
+  }
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        "User-Agent": "aistudio-build",
+      },
+    },
+  });
+};
+
+// PDF to Markdown conversion endpoint
+app.post("/api/convert-pdf", convertLimiter, async (req, res) => {
+  try {
+    const { pdfBase64, fileName, options } = req.body;
+
+    if (!pdfBase64) {
+      return res.status(400).json({ error: "Falta el archivo PDF en formato base64." });
+    }
+
+    // Validate PDF size server-side (max 10 MB decoded)
+    const estimatedBytes = Math.ceil((pdfBase64.length * 3) / 4);
+    const maxBytes = 10 * 1024 * 1024; // 10 MB
+    if (estimatedBytes > maxBytes) {
+      return res.status(413).json({
+        error: `El archivo PDF supera el límite de 10 MB (tamaño estimado: ${(estimatedBytes / 1024 / 1024).toFixed(1)} MB). Por favor, usa un archivo más pequeño.`,
+      });
+    }
+
+    const ai = getGeminiClient();
+
+    // Prepare system instruction or custom instructions based on user choices
+    const promptInstructions = options?.instructions || "";
+    const systemPrompt = `You are an expert document parser. Your goal is to convert the uploaded PDF document into structured, clean Markdown (.md) format.
+Follow these rigid output formatting guidelines:
+1. Retain document structures: headings (H1, H2, H3), paragraphs, bullet/numbered lists, quotes, tables, bold/italic formatting, and code blocks.
+2. Structure tables precisely using standard Markdown table syntax.
+3. Keep the output strictly in Markdown format. Do NOT wrap the entire output in a triple-backtick markdown block (like \`\`\`markdown ... \`\`\`) unless the document itself exists exclusively to contain custom source code formatting.
+4. If there are headers, footers, page numbers, or repetitive navigation artifacts, omit them gracefully unless they hold actual content value.
+5. If mathematical equations or formulas are present, format them clearly in standard LaTeX format (using $$ for block math and $ for inline math).
+${promptInstructions ? `6. Additional user request direction: "${promptInstructions}"` : ""}`;
+
+    const pdfPart = {
+      inlineData: {
+        mimeType: "application/pdf",
+        data: pdfBase64,
+      },
+    };
+
+    const textPart = {
+      text: "Convert this PDF document to clean, elegant, and standard Markdown format according to your parsing instructions.",
+    };
+
+    // AbortController for 60-second timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60_000);
+
+    let markdownText = "";
+    try {
+      const response = await ai.models.generateContent({
+        model: "gemini-1.5-flash",
+        contents: { parts: [pdfPart, textPart] },
+        config: {
+          systemInstruction: systemPrompt,
+        },
+      });
+      markdownText = response.text || "";
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    return res.json({
+      success: true,
+      markdown: markdownText,
+      fileName: fileName || "document.pdf",
+    });
+  } catch (error: any) {
+    console.error("Conversion error details:", error);
+
+    if (error?.name === "AbortError") {
+      return res.status(504).json({
+        error: "La conversión tardó demasiado (más de 60 segundos). Intenta con un PDF más pequeño.",
+      });
+    }
+
+    return res.status(500).json({
+      error: "Error durante la conversión del PDF a Markdown.",
+      details: error?.message || "Internal Server Error",
+    });
+  }
+});
+
+// Configure Vite or Serve static assets
+async function setupServer() {
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
+  }
+
+  const server = app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`\n❌ Port ${PORT} is already in use.`);
+      console.error(`   Stop the other process or set a different PORT in your .env file.\n`);
+      process.exit(1);
+    } else {
+      throw err;
+    }
+  });
+}
+
+setupServer();
