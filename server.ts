@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import rateLimit from "express-rate-limit";
 import { convertPdfWithFallback, FALLBACK_MODELS } from "./lib/openrouter-client";
 import { convertPdfWithGemini } from "./lib/gemini-client";
+import { convertPdfLocally } from "./lib/local-ocr-client";
 
 dotenv.config();
 
@@ -40,7 +41,7 @@ ${instructions ? `6. Additional user request direction: "${instructions}"` : ""}
 // PDF to Markdown conversion endpoint — OpenRouter with automatic fallback or direct Gemini AI Studio
 app.post("/api/convert-pdf", convertLimiter, async (req, res) => {
   try {
-    const { pdfBase64, fileName, options, provider = "openrouter" } = req.body;
+    const { pdfBase64, fileName, options, provider = "openrouter", customApiKey } = req.body;
 
     if (!pdfBase64) {
       return res.status(400).json({ error: "Falta el archivo PDF en formato base64." });
@@ -57,17 +58,28 @@ app.post("/api/convert-pdf", convertLimiter, async (req, res) => {
 
     const systemPrompt = buildSystemPrompt(options?.instructions ?? "");
 
-    // 60-second timeout
+    // 5-minute timeout (300 seconds) for large PDF conversions
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60_000);
+    const timeoutId = setTimeout(() => controller.abort(), 300_000);
 
-    let result;
+    let result: { markdown: string; modelUsed: string; attemptsCount: number; maxAttempts: number; warnings?: string[] };
     try {
-      if (provider === "gemini") {
-        const apiKey = process.env.GEMINI_API_KEY;
+      if (provider === "local-ocr") {
+        const localRes = await convertPdfLocally(pdfBase64, {
+          signal: controller.signal,
+        });
+        result = {
+          markdown: localRes.markdown,
+          modelUsed: "Extracción Local (OCR/Texto)",
+          attemptsCount: 1,
+          maxAttempts: 1,
+          warnings: localRes.warnings,
+        };
+      } else if (provider === "gemini") {
+        const apiKey = customApiKey || process.env.GEMINI_API_KEY;
         if (!apiKey) {
           return res.status(400).json({
-            error: "La API Key de Google AI Studio (GEMINI_API_KEY) no está configurada en el servidor.",
+            error: "La API Key de Google AI Studio (GEMINI_API_KEY) no está configurada y no se proporcionó una clave personalizada.",
           });
         }
         const geminiRes = await convertPdfWithGemini({
@@ -118,13 +130,14 @@ app.post("/api/convert-pdf", convertLimiter, async (req, res) => {
       markdown: result.markdown,
       fileName: fileName ?? "document.pdf",
       modelUsed: result.modelUsed,
+      warnings: result.warnings || [],
     });
   } catch (error: any) {
     console.error("Conversion error details:", error);
 
     if (error?.name === "AbortError") {
       return res.status(504).json({
-        error: "La conversión tardó demasiado (más de 60 segundos). Intenta con un PDF más pequeño.",
+        error: "La conversión tardó demasiado (límite de 5 minutos excedido). Intenta con un PDF más pequeño o divide el documento.",
       });
     }
 
