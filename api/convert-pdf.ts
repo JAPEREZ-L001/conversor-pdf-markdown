@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { convertPdfWithFallback, FALLBACK_MODELS } from "../lib/openrouter-client.js";
 import { convertPdfWithGemini } from "../lib/gemini-client.js";
+import { convertPdfLocally } from "../lib/local-ocr-client.js";
 
 // In-memory rate limiter (per serverless instance)
 const limiterStore = new Map<string, { count: number; resetAt: number }>();
@@ -46,11 +47,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    const { pdfBase64, fileName, options, provider = "openrouter" } = req.body as {
+    const { pdfBase64, fileName, options, provider = "openrouter", customApiKey } = req.body as {
       pdfBase64: string;
       fileName?: string;
       options?: { instructions?: string };
-      provider?: "openrouter" | "gemini";
+      provider?: "openrouter" | "gemini" | "local-ocr";
+      customApiKey?: string;
     };
 
     if (!pdfBase64) {
@@ -68,17 +70,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const systemPrompt = buildSystemPrompt(options?.instructions ?? "");
 
-    // 60-second timeout
+    // 5-minute timeout (300 seconds) for large PDF conversions
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60_000);
+    const timeoutId = setTimeout(() => controller.abort(), 300_000);
 
-    let result;
+    let result: { markdown: string; modelUsed: string; attemptsCount: number; maxAttempts: number; warnings?: string[] };
     try {
-      if (provider === "gemini") {
-        const apiKey = process.env.GEMINI_API_KEY;
+      if (provider === "local-ocr") {
+        const localRes = await convertPdfLocally(pdfBase64, {
+          signal: controller.signal,
+        });
+        result = {
+          markdown: localRes.markdown,
+          modelUsed: "Extracción Local (OCR/Texto)",
+          attemptsCount: 1,
+          maxAttempts: 1,
+          warnings: localRes.warnings,
+        };
+      } else if (provider === "gemini") {
+        const apiKey = customApiKey || process.env.GEMINI_API_KEY;
         if (!apiKey) {
           return res.status(400).json({
-            error: "La API Key de Google AI Studio (GEMINI_API_KEY) no está configurada en el servidor.",
+            error: "La API Key de Google AI Studio (GEMINI_API_KEY) no está configurada y no se proporcionó una clave personalizada.",
           });
         }
         const geminiRes = await convertPdfWithGemini({
@@ -129,13 +142,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       markdown: result.markdown,
       fileName: fileName ?? "document.pdf",
       modelUsed: result.modelUsed,
+      warnings: result.warnings || [],
     });
   } catch (error: any) {
     console.error("Serverless conversion error:", error);
 
     if (error?.name === "AbortError") {
       return res.status(504).json({
-        error: "La conversión tardó demasiado (más de 60 segundos). Intenta con un PDF más pequeño.",
+        error: "La conversión tardó demasiado (límite de 5 minutos excedido). Intenta con un PDF más pequeño o divide el documento.",
       });
     }
 

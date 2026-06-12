@@ -1,15 +1,17 @@
 /**
  * OpenRouter client with automatic model fallback.
- * Tries each model in the chain sequentially — all free, all with vision.
+ * Tries each model in the chain sequentially.
  *
  * Fallback chain:
- *  1. google/gemini-2.0-flash-exp:free  → Best: native PDF, 1M token context
- *  2. google/gemma-4-31b-it:free        → Strong: image+text+video, 262K ctx
- *  3. google/gemma-4-26b-a4b-it:free    → Efficient MoE: image+text+video, 262K ctx
+ *  1. google/gemini-2.5-flash           → Paid: native PDF, 1M token context (extremely cheap)
+ *  2. google/gemini-2.5-flash-lite      → Paid: native PDF, 1M token context (even cheaper)
+ *  3. google/gemma-4-31b-it:free        → Free: image+text+video, 262K ctx (for smaller PDFs)
+ *  4. google/gemma-4-26b-a4b-it:free    → Free MoE: image+text+video, 262K ctx (for smaller PDFs)
  */
 
 export const FALLBACK_MODELS = [
-  "google/gemini-2.0-flash-exp:free",
+  "google/gemini-2.5-flash",
+  "google/gemini-2.5-flash-lite",
   "google/gemma-4-31b-it:free",
   "google/gemma-4-26b-a4b-it:free",
 ] as const;
@@ -77,7 +79,7 @@ export async function convertPdfWithFallback(
                 content: [
                   {
                     type: "text",
-                    text: "Convert this PDF document to clean, elegant, and standard Markdown format according to your parsing instructions.",
+                    text: `Convert this PDF document to clean, elegant, and standard Markdown format according to these parsing instructions:\n\n${systemPrompt}`,
                   },
                   {
                     // OpenRouter file part — works for Gemini (native PDF) and

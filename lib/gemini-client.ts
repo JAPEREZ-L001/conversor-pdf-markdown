@@ -45,7 +45,7 @@ export async function convertPdfWithGemini(
               },
             },
             {
-              text: "Convert this PDF document to clean, elegant, and standard Markdown format according to your parsing instructions.",
+              text: `Convert this PDF document to clean, elegant, and standard Markdown format according to these parsing instructions:\n\n${systemPrompt}`,
             },
           ],
         },
