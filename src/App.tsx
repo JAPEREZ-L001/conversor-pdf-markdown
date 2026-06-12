@@ -14,13 +14,16 @@ import {
   ArrowRight,
   RefreshCw,
   AlertCircle,
+  AlertTriangle,
   Eye,
   Code,
   Sparkles,
   Settings2,
   FileDown,
   X,
-  Languages
+  Languages,
+  Key,
+  HardDrive
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
@@ -36,14 +39,16 @@ export default function App() {
   const [isConverting, setIsConverting] = useState<boolean>(false);
   const [markdownResult, setMarkdownResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
   
   // Engine Provider State
-  const [provider, setProvider] = useState<"openrouter" | "gemini">(() => {
+  const [provider, setProvider] = useState<"openrouter" | "gemini" | "local-ocr">(() => {
     const saved = localStorage.getItem("conversor_provider");
-    return (saved === "gemini" ? "gemini" : "openrouter") as "openrouter" | "gemini";
+    if (saved === "gemini" || saved === "local-ocr") return saved;
+    return "openrouter";
   });
 
-  const handleProviderChange = (newProvider: "openrouter" | "gemini") => {
+  const handleProviderChange = (newProvider: "openrouter" | "gemini" | "local-ocr") => {
     setProvider(newProvider);
     localStorage.setItem("conversor_provider", newProvider);
   };
@@ -54,6 +59,18 @@ export default function App() {
   const [preserveTables, setPreserveTables] = useState<boolean>(true);
   const [mathLatex, setMathLatex] = useState<boolean>(false);
   const [translateEnglish, setTranslateEnglish] = useState<boolean>(false);
+
+  // BYOK API Keys
+  const [geminiApiKey, setGeminiApiKey] = useState<string>(() => {
+    return localStorage.getItem("conversor_gemini_api_key") || "";
+  });
+
+  const handleGeminiApiKeyChange = (key: string) => {
+    setGeminiApiKey(key);
+    localStorage.setItem("conversor_gemini_api_key", key);
+  };
+
+  const [showApiConfig, setShowApiConfig] = useState<boolean>(false);
 
   // Clipboard & UI State
   const [activeTab, setActiveTab] = useState<"preview" | "raw">("preview");
@@ -122,17 +139,21 @@ export default function App() {
     setIsConverting(true);
     setError(null);
     setMarkdownResult(null);
+    setWarnings([]);
 
-    // Build specific user prompt instructions sequence
-    let instructions = customInstructions;
-    if (preserveTables) {
-      instructions += "\n- Formatea rigurosamente cualquier tabla detectada utilizando sintaxis markdown estructurada estándar.";
-    }
-    if (mathLatex) {
-      instructions += "\n- Detecta y formatea con cuidado expresiones y fórmulas matemáticas utilizando LaTeX estándar (ej. $$ para ecuaciones en bloque, $ para texto en línea).";
-    }
-    if (translateEnglish) {
-      instructions += "\n- Traduce todo el contenido extraído al idioma inglés manteniendo el formato original.";
+    // Build specific user prompt instructions sequence (only for AI providers)
+    let instructions = "";
+    if (provider !== "local-ocr") {
+      instructions = customInstructions;
+      if (preserveTables) {
+        instructions += "\n- Formatea rigurosamente cualquier tabla detectada utilizando sintaxis markdown estructurada estándar.";
+      }
+      if (mathLatex) {
+        instructions += "\n- Detecta y formatea con cuidado expresiones y fórmulas matemáticas utilizando LaTeX estándar (ej. $$ para ecuaciones en bloque, $ para texto en línea).";
+      }
+      if (translateEnglish) {
+        instructions += "\n- Traduce todo el contenido extraído al idioma inglés manteniendo el formato original.";
+      }
     }
 
     try {
@@ -148,6 +169,7 @@ export default function App() {
           options: {
             instructions: instructions.trim(),
           },
+          customApiKey: provider === "gemini" ? geminiApiKey : undefined,
         }),
       });
 
@@ -166,6 +188,9 @@ export default function App() {
       }
 
       setMarkdownResult(data.markdown);
+      if (data.warnings && data.warnings.length > 0) {
+        setWarnings(data.warnings);
+      }
     } catch (err: any) {
       console.error(err);
       setError(err.message || "No se pudo realizar la conversión. Verifica tu conexión.");
@@ -205,6 +230,7 @@ export default function App() {
     setFileBase64(null);
     setMarkdownResult(null);
     setError(null);
+    setWarnings([]);
     setCustomInstructions("");
   };
 
@@ -231,9 +257,9 @@ export default function App() {
           </div>
           
           <div className="flex items-center space-x-2 text-xs text-neutral-500 font-mono">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            <span className={`w-2 h-2 rounded-full ${provider === "local-ocr" ? "bg-sky-500" : "bg-emerald-500"} animate-pulse`} />
             <span>
-              {provider === "gemini" ? "Gemini 2.0 Flash (AI Studio)" : "OpenRouter (Gemini/Gemma)"}
+              {provider === "gemini" ? "Gemini 2.5 Flash (AI Studio)" : provider === "local-ocr" ? "Extracción Local (OCR)" : "OpenRouter (Gemini/Gemma)"}
             </span>
           </div>
         </div>
@@ -262,11 +288,11 @@ export default function App() {
               <label className="text-xs font-semibold text-neutral-500 uppercase tracking-wider block mb-3 font-mono">
                 Motor de Inteligencia Artificial
               </label>
-              <div className="grid grid-cols-2 gap-2 bg-neutral-50 p-1 rounded-lg border border-neutral-100">
+              <div className="grid grid-cols-3 gap-1.5 bg-neutral-50 p-1 rounded-lg border border-neutral-100">
                 <button
                   type="button"
                   onClick={() => handleProviderChange("openrouter")}
-                  className={`py-2 px-3 rounded-md text-xs font-semibold tracking-tight transition-all cursor-pointer ${
+                  className={`py-2 px-2 rounded-md text-xs font-semibold tracking-tight transition-all cursor-pointer ${
                     provider === "openrouter"
                       ? "bg-white text-neutral-950 shadow-xs border border-neutral-200/50"
                       : "text-neutral-500 hover:text-neutral-800 border border-transparent"
@@ -277,20 +303,101 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => handleProviderChange("gemini")}
-                  className={`py-2 px-3 rounded-md text-xs font-semibold tracking-tight transition-all cursor-pointer ${
+                  className={`py-2 px-2 rounded-md text-xs font-semibold tracking-tight transition-all cursor-pointer ${
                     provider === "gemini"
                       ? "bg-white text-neutral-950 shadow-xs border border-neutral-200/50"
                       : "text-neutral-500 hover:text-neutral-800 border border-transparent"
                   }`}
                 >
-                  Google AI Studio
+                  AI Studio
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleProviderChange("local-ocr")}
+                  className={`py-2 px-2 rounded-md text-xs font-semibold tracking-tight transition-all cursor-pointer ${
+                    provider === "local-ocr"
+                      ? "bg-white text-neutral-950 shadow-xs border border-neutral-200/50"
+                      : "text-neutral-500 hover:text-neutral-800 border border-transparent"
+                  }`}
+                >
+                  <span className="flex items-center justify-center space-x-1">
+                    <HardDrive className="w-3 h-3" />
+                    <span>Local</span>
+                  </span>
                 </button>
               </div>
               <p className="text-[11px] text-neutral-400 mt-2.5 leading-relaxed font-sans">
                 {provider === "openrouter"
-                  ? "Utiliza una cadena de fallbacks (Gemini 2.0 → Gemma 31B → Gemma 26B). Requiere mínimo $1 USD de saldo en tu cuenta de OpenRouter."
-                  : "Conexión directa y 100% gratuita utilizando la API Key oficial de Google AI Studio (modelo Gemini 2.0 Flash). Sin mínimos de saldo."}
+                  ? "Cadena de fallbacks (Gemini 2.5 → Gemma 31B → Gemma 26B). Requiere mínimo $1 USD de saldo en OpenRouter."
+                  : provider === "local-ocr"
+                  ? "Extracción 100% local y gratuita. Texto digital vía pdfjs-dist y OCR vía Tesseract.js para escaneos. Sin API Key. No soporta tablas complejas ni LaTeX."
+                  : "Conexión directa y 100% gratuita con la API Key de Google AI Studio (Gemini 2.5 Flash). Sin mínimos de saldo."}
               </p>
+            </div>
+
+            {/* API Key Configuration Card (BYOK) */}
+            <div className="bg-white rounded-xl border border-neutral-200 p-5 shadow-xs">
+              <button
+                type="button"
+                onClick={() => setShowApiConfig(!showApiConfig)}
+                className="flex items-center justify-between w-full text-left font-sans font-semibold text-xs text-neutral-500 uppercase tracking-wider cursor-pointer"
+              >
+                <span className="flex items-center space-x-1.5 font-mono">
+                  <Key className="w-3.5 h-3.5 text-neutral-600" />
+                  <span>Mis API Keys (BYOK)</span>
+                </span>
+                <span className="text-xs text-neutral-400 font-sans normal-case font-normal">
+                  {showApiConfig ? "Ocultar" : "Configurar"}
+                </span>
+              </button>
+              
+              <AnimatePresence>
+                {showApiConfig && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: "auto", opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    className="overflow-hidden mt-4 pt-4 border-t border-neutral-100 space-y-4"
+                  >
+                    <div>
+                      <label className="text-xs font-medium text-neutral-700 block mb-1 font-sans flex items-center justify-between">
+                        <span>Google AI Studio API Key</span>
+                        {geminiApiKey ? (
+                          <span className="text-[10px] text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded font-mono font-medium">
+                            Configurada (Local)
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-neutral-400 font-mono">
+                            Usando clave del servidor
+                          </span>
+                        )}
+                      </label>
+                      <input
+                        type="password"
+                        value={geminiApiKey}
+                        onChange={(e) => handleGeminiApiKeyChange(e.target.value)}
+                        placeholder="Ingresa tu API Key (AIzaSy...)"
+                        className="w-full text-xs p-2.5 border border-neutral-200 rounded-lg focus:outline-none focus:border-neutral-500 bg-neutral-50 font-mono transition-all"
+                      />
+                    </div>
+
+                    <div className="opacity-60 relative">
+                      <label className="text-xs font-medium text-neutral-500 block mb-1 font-sans flex items-center justify-between">
+                        <span>OpenRouter API Key</span>
+                        <span className="text-[10px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded font-mono font-semibold">
+                          Próximamente
+                        </span>
+                      </label>
+                      <input
+                        type="password"
+                        disabled
+                        placeholder="sk-or-v1-... (Próximamente)"
+                        className="w-full text-xs p-2.5 border border-dashed border-neutral-200 rounded-lg bg-neutral-100 font-mono cursor-not-allowed"
+                      />
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
 
             {/* Upload Zone */}
@@ -392,8 +499,16 @@ export default function App() {
                       exit={{ height: 0, opacity: 0 }}
                       className="overflow-hidden mt-4 pt-4 border-t border-neutral-100 space-y-4"
                     >
+                      {provider === "local-ocr" && (
+                        <div className="bg-sky-50 border border-sky-100 rounded-lg p-3 flex items-start space-x-2">
+                          <HardDrive className="w-4 h-4 text-sky-500 mt-0.5 shrink-0" />
+                          <p className="text-[11px] text-sky-700 leading-relaxed">
+                            Las opciones avanzadas (tablas estrictas, LaTeX, traducción e instrucciones personalizadas) requieren un modelo de IA y no están disponibles en el modo de <strong>Extracción Local</strong>.
+                          </p>
+                        </div>
+                      )}
                       {/* Checkboxes for presets */}
-                      <div className="space-y-3">
+                      <div className={`space-y-3 ${provider === "local-ocr" ? "opacity-40 pointer-events-none select-none" : ""}`}>
                         <label className="flex items-start space-x-3 cursor-pointer">
                           <input
                             type="checkbox"
@@ -438,7 +553,7 @@ export default function App() {
                       </div>
 
                       {/* Prompt area */}
-                      <div>
+                      <div className={provider === "local-ocr" ? "opacity-40 pointer-events-none select-none" : ""}>
                         <label className="text-xs font-medium text-neutral-700 block mb-1.5 font-sans">
                           Instrucciones personalizadas para la IA (opcional):
                         </label>
@@ -491,6 +606,25 @@ export default function App() {
                 <div className="flex-grow">
                   <p className="font-semibold text-rose-950">Se produjo un error</p>
                   <p className="text-xs mt-1 text-rose-700 leading-relaxed">{error}</p>
+                </div>
+              </motion.div>
+            )}
+
+            {/* Warnings from local-ocr conversion */}
+            {warnings.length > 0 && !error && markdownResult && (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="bg-amber-50 border border-amber-100 rounded-xl p-4 text-amber-800 flex items-start space-x-3 text-sm"
+              >
+                <AlertTriangle className="w-5 h-5 mt-0.5 shrink-0 text-amber-500" />
+                <div className="flex-grow">
+                  <p className="font-semibold text-amber-950 text-xs">Avisos de la extracción</p>
+                  <ul className="text-[11px] mt-1.5 text-amber-700 leading-relaxed space-y-1">
+                    {warnings.map((w, i) => (
+                      <li key={i}>• {w}</li>
+                    ))}
+                  </ul>
                 </div>
               </motion.div>
             )}
@@ -556,7 +690,7 @@ export default function App() {
                       </h3>
                       <div className="max-w-xs space-y-1.5">
                         <p className="text-xs text-neutral-400 font-sans tracking-wide">
-                          {provider === "gemini" ? "Gemini 2.0 Flash" : "El motor de OpenRouter"} está procesando el archivo PDF para preservar el formato sin perder detalles.
+                          {provider === "gemini" ? "Gemini 2.5 Flash" : provider === "local-ocr" ? "El motor local de extracción (pdfjs + Tesseract)" : "El motor de OpenRouter"} está procesando el archivo PDF para preservar el formato sin perder detalles.
                         </p>
                         <div className="w-36 h-1.5 bg-neutral-100 rounded-full mx-auto overflow-hidden mt-4">
                           <div className="h-full bg-neutral-900 rounded-full animate-[loading_1.5s_infinite_ease-in-out]" style={{ width: "60%" }} />

@@ -8,3 +8,6 @@ coverage/
 !.env.example
 
 .vercel
+
+# Ignore temporary work folders
+**/work/
